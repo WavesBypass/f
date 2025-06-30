@@ -1,0 +1,4 @@
+locust
+httpx
+aiohttp
+colorama

